@@ -1,6 +1,31 @@
+@"
 .venv/
 __pycache__/
 *.pyc
 logs/
 uploads/
 test.pcap
+
+# Environment / secrets
+.env
+.env.*
+
+# Large datasets
+data/*.csv
+data/*.pcap
+data/*.pcapng
+data/*.cap
+
+# Generated ML artifacts
+models/*.joblib
+models/*.pkl
+
+# Frontend dependencies / build
+frontend/node_modules/
+frontend/dist/
+
+# OS / editor files
+.DS_Store
+Thumbs.db
+.vscode/
+"@ | Set-Content .gitignore

@@ -1,70 +1,381 @@
-import logging
-from scapy.all import rdpcap, IP, TCP, UDP, ICMP
 import os
+import logging
+from datetime import datetime
+from scapy.all import rdpcap, IP, IPv6, ARP, TCP, UDP, ICMP
 
-logger = logging.getLogger('flask.app')
+logger = logging.getLogger("flask.app")
+
+
+def _format_tcp_flags(flags_val):
+    """Convert TCP flags into a human-readable string."""
+    if not flags_val:
+        return "NONE"
+
+    flag_str = str(flags_val)
+
+    flag_map = {
+        "F": "FIN",
+        "S": "SYN",
+        "R": "RST",
+        "P": "PSH",
+        "A": "ACK",
+        "U": "URG",
+        "E": "ECE",
+        "C": "CWR",
+    }
+
+    parsed = [name for char, name in flag_map.items() if char in flag_str]
+
+    return "-".join(parsed) if parsed else flag_str
+
 
 def parse_pcap(filepath):
     """
-    Parses a PCAP file and extracts network features for each packet.
-    
-    Args:
-        filepath (str): Path to the .pcap file.
-        
-    Returns:
-        list: A list of dictionaries, where each dictionary contains features
-              extracted from a single packet.
+    Parse a real PCAP/PCAPNG file using Scapy.
+
+    Extracts:
+    - packet metadata
+    - protocol statistics
+    - IP hosts
+    - communication pairs
+    - topology nodes and edges
     """
+
     if not os.path.exists(filepath):
         logger.error(f"PCAP file not found: {filepath}")
         raise FileNotFoundError(f"PCAP file not found: {filepath}")
 
     try:
-        logger.info(f"Starting to parse PCAP file: {filepath}")
+        logger.info(f"Parsing PCAP file with Scapy: {filepath}")
         packets = rdpcap(filepath)
     except Exception as e:
         logger.error(f"Failed to read PCAP file {filepath}: {e}")
-        raise ValueError(f"Failed to read PCAP file. Ensure it is a valid .pcap format. Details: {e}")
+        raise ValueError(
+            f"Failed to read PCAP file. "
+            f"Ensure it is a valid .pcap or .pcapng file. Details: {e}"
+        )
 
-    extracted_data = []
+    parsed_packets = []
+
+    total_bytes = 0
+
+    tcp_count = 0
+    udp_count = 0
+    icmp_count = 0
+    other_count = 0
+
+    src_ip_set = set()
+    dst_ip_set = set()
+    all_hosts = set()
+
+    host_packet_counts = {}
+
+    # ALL communication pairs are stored here
+    comm_pairs = {}
 
     for pkt_num, packet in enumerate(packets, start=1):
+
         try:
-            # Initialize default values
-            pkt_info = {
-                "packet_id": pkt_num,
-                "src_ip": None,
-                "dst_ip": None,
-                "protocol": 0,
-                "src_port": 0,
-                "dst_port": 0,
-                "packet_size": len(packet),
-                "tcp_flags": 0
-            }
+            pkt_len = len(packet)
+            total_bytes += pkt_len
 
-            # Extract IP layer information
+            # ---------------------------------------------------------
+            # Timestamp
+            # ---------------------------------------------------------
+            pkt_time = getattr(packet, "time", None)
+
+            if pkt_time:
+                timestamp_str = datetime.fromtimestamp(
+                    float(pkt_time)
+                ).strftime("%H:%M:%S.%f")[:-3]
+            else:
+                timestamp_str = "N/A"
+
+            # ---------------------------------------------------------
+            # Default values
+            # ---------------------------------------------------------
+            src_ip = None
+            dst_ip = None
+
+            proto_num = 0
+            proto_name = "OTHER"
+
+            src_port = 0
+            dst_port = 0
+
+            tcp_flags_str = ""
+
+            # ---------------------------------------------------------
+            # IP / IPv6 / ARP extraction
+            # ---------------------------------------------------------
             if IP in packet:
-                pkt_info["src_ip"] = packet[IP].src
-                pkt_info["dst_ip"] = packet[IP].dst
-                pkt_info["protocol"] = packet[IP].proto
 
-            # Extract Transport layer information (TCP)
+                src_ip = packet[IP].src
+                dst_ip = packet[IP].dst
+                proto_num = packet[IP].proto
+
+            elif IPv6 in packet:
+
+                src_ip = packet[IPv6].src
+                dst_ip = packet[IPv6].dst
+                proto_num = packet[IPv6].nh
+
+            elif ARP in packet:
+
+                src_ip = packet[ARP].psrc
+                dst_ip = packet[ARP].pdst
+                proto_num = 2054
+                proto_name = "ARP"
+
+            # ---------------------------------------------------------
+            # Protocol detection
+            # ---------------------------------------------------------
             if TCP in packet:
-                pkt_info["src_port"] = packet[TCP].sport
-                pkt_info["dst_port"] = packet[TCP].dport
-                pkt_info["tcp_flags"] = int(packet[TCP].flags)
-            # Extract Transport layer information (UDP)
-            elif UDP in packet:
-                pkt_info["src_port"] = packet[UDP].sport
-                pkt_info["dst_port"] = packet[UDP].dport
 
-            # We only append packets that have IP layer for our analysis
-            if pkt_info["src_ip"] is not None:
-                extracted_data.append(pkt_info)
+                proto_name = "TCP"
+                proto_num = 6
+
+                tcp_count += 1
+
+                src_port = int(packet[TCP].sport)
+                dst_port = int(packet[TCP].dport)
+
+                tcp_flags_str = _format_tcp_flags(
+                    packet[TCP].flags
+                )
+
+            elif UDP in packet:
+
+                proto_name = "UDP"
+                proto_num = 17
+
+                udp_count += 1
+
+                src_port = int(packet[UDP].sport)
+                dst_port = int(packet[UDP].dport)
+
+            elif ICMP in packet:
+
+                proto_name = "ICMP"
+                proto_num = 1
+
+                icmp_count += 1
+
+            elif ARP in packet:
+
+                proto_name = "ARP"
+                proto_num = 2054
+
+                other_count += 1
+
+            else:
+
+                proto_name = "OTHER"
+                other_count += 1
+
+            # ---------------------------------------------------------
+            # Network relationship analysis
+            #
+            # Only packets with real source/destination IP addresses
+            # participate in host/topology/anomaly analysis.
+            # ---------------------------------------------------------
+            if src_ip and dst_ip:
+
+                src_ip_set.add(src_ip)
+                dst_ip_set.add(dst_ip)
+
+                all_hosts.add(src_ip)
+                all_hosts.add(dst_ip)
+
+                # Count packets generated by source
+                host_packet_counts[src_ip] = (
+                    host_packet_counts.get(src_ip, 0) + 1
+                )
+
+                # -----------------------------------------------------
+                # Communication pair
+                # -----------------------------------------------------
+                pair_key = (src_ip, dst_ip)
+
+                if pair_key not in comm_pairs:
+
+                    comm_pairs[pair_key] = {
+                        "packets": 0,
+                        "bytes": 0,
+                        "protocols": set(),
+                    }
+
+                comm_pairs[pair_key]["packets"] += 1
+                comm_pairs[pair_key]["bytes"] += pkt_len
+
+                comm_pairs[pair_key]["protocols"].add(
+                    proto_name
+                )
+
+            # ---------------------------------------------------------
+            # Store packet
+            # ---------------------------------------------------------
+            parsed_packets.append(
+                {
+                    "packet_id": pkt_num,
+                    "timestamp": timestamp_str,
+
+                    # Display value only.
+                    # These are NOT used as real IPs for anomaly analysis.
+                    "src_ip": src_ip or "Unknown",
+                    "dst_ip": dst_ip or "Unknown",
+
+                    "src_port": src_port,
+                    "dst_port": dst_port,
+
+                    "protocol": proto_name,
+                    "protocol_num": proto_num,
+
+                    "length": pkt_len,
+                    "tcp_flags": tcp_flags_str,
+
+                    # Important internal flags
+                    "has_ip": bool(src_ip and dst_ip),
+                }
+            )
 
         except Exception as e:
-            logger.warning(f"Error parsing packet #{pkt_num}: {e}")
+
+            logger.warning(
+                f"Error parsing packet #{pkt_num}: {e}"
+            )
+
             continue
 
-    logger.info(f"Successfully parsed {len(extracted_data)} valid IP packets from {filepath}")
-    return extracted_data
+    # -------------------------------------------------------------
+    # Total parsed packets
+    # -------------------------------------------------------------
+    total_packets = len(parsed_packets)
+
+    # -------------------------------------------------------------
+    # Protocol percentages
+    # -------------------------------------------------------------
+    tcp_pct = (
+        round((tcp_count / total_packets) * 100.0, 1)
+        if total_packets > 0
+        else 0.0
+    )
+
+    udp_pct = (
+        round((udp_count / total_packets) * 100.0, 1)
+        if total_packets > 0
+        else 0.0
+    )
+
+    icmp_pct = (
+        round((icmp_count / total_packets) * 100.0, 1)
+        if total_packets > 0
+        else 0.0
+    )
+
+    other_pct = (
+        round((other_count / total_packets) * 100.0, 1)
+        if total_packets > 0
+        else 0.0
+    )
+
+    # -------------------------------------------------------------
+    # Top communications
+    #
+    # Display only top 15.
+    # IMPORTANT: comm_pairs still contains ALL pairs.
+    # -------------------------------------------------------------
+    top_communications = []
+
+    for (src, dst), comm_data in sorted(
+        comm_pairs.items(),
+        key=lambda x: x[1]["packets"],
+        reverse=True
+    )[:15]:
+
+        top_communications.append(
+            {
+                "src_ip": src,
+                "dst_ip": dst,
+                "packets": comm_data["packets"],
+                "bytes": comm_data["bytes"],
+                "protocol": ", ".join(
+                    sorted(comm_data["protocols"])
+                ),
+            }
+        )
+
+    # -------------------------------------------------------------
+    # Topology
+    # -------------------------------------------------------------
+    topology_nodes = [
+        {
+            "id": host,
+            "label": host,
+            "packet_count": host_packet_counts.get(host, 0),
+        }
+        for host in sorted(all_hosts)
+    ]
+
+    topology_edges = [
+        {
+            "source": src,
+            "target": dst,
+            "packets": data["packets"],
+            "bytes": data["bytes"],
+            "protocol": ", ".join(
+                sorted(data["protocols"])
+            ),
+        }
+        for (src, dst), data in comm_pairs.items()
+    ]
+
+    # -------------------------------------------------------------
+    # Return complete analysis
+    # -------------------------------------------------------------
+    return {
+        "summary": {
+            "total_packets": total_packets,
+            "total_bytes": total_bytes,
+
+            "unique_src_ips": len(src_ip_set),
+            "unique_dst_ips": len(dst_ip_set),
+            "unique_hosts": len(all_hosts),
+
+            "filename": os.path.basename(filepath),
+        },
+
+        "protocol_distribution": {
+            "tcp_count": tcp_count,
+            "udp_count": udp_count,
+            "icmp_count": icmp_count,
+            "other_count": other_count,
+
+            "tcp_percentage": tcp_pct,
+            "udp_percentage": udp_pct,
+            "icmp_percentage": icmp_pct,
+            "other_percentage": other_pct,
+        },
+
+        "top_communications": top_communications,
+
+        "topology": {
+            "nodes": topology_nodes,
+            "edges": topology_edges,
+        },
+
+        "packets": parsed_packets,
+
+        # Used internally by anomaly detection.
+        # Contains every communication pair in a JSON-safe format.
+        "_communication_pairs": [
+            {
+                "src_ip": src,
+                "dst_ip": dst,
+                "packets": data["packets"],
+                "bytes": data["bytes"],
+                "protocols": sorted(list(data["protocols"])),
+            }
+            for (src, dst), data in comm_pairs.items()
+        ],
+    }

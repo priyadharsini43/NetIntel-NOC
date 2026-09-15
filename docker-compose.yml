@@ -1,0 +1,53 @@
+version: '3.8'
+
+services:
+  postgres:
+    image: postgres:15-alpine
+    container_name: netintel_postgres
+    restart: always
+    environment:
+      POSTGRES_DB: netintel_db
+      POSTGRES_USER: netintel_user
+      POSTGRES_PASSWORD: netintel_password
+    ports:
+      - "5432:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+
+  backend:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: netintel_backend
+    restart: always
+    cap_add:
+      - NET_ADMIN
+      - NET_RAW
+    environment:
+      - FLASK_ENV=production
+      - DATABASE_URL=postgresql://netintel_user:netintel_password@postgres:5432/netintel_db
+      - SECRET_KEY=prod-secret-key-netintel-v2
+      - JWT_SECRET_KEY=prod-jwt-secret-netintel-v2
+      - GEMINI_API_KEY=${GEMINI_API_KEY}
+    ports:
+      - "5000:5000"
+    depends_on:
+      - postgres
+    volumes:
+      - ./uploads:/app/uploads
+      - ./data:/app/data
+      - ./logs:/app/logs
+
+  frontend:
+    build:
+      context: ./frontend
+      dockerfile: Dockerfile
+    container_name: netintel_frontend
+    restart: always
+    ports:
+      - "80:80"
+    depends_on:
+      - backend
+
+volumes:
+  postgres_data:

@@ -2,14 +2,17 @@ import os
 import logging
 from logging.handlers import RotatingFileHandler
 from flask import Flask, jsonify
+from dotenv import load_dotenv
+
+# Load environment variables
+load_dotenv()
 
 from config import config
 from routes import register_blueprints
-from core.database import init_db
 
 
 def create_app(config_name='default'):
-    """Application factory for the Flask app."""
+    """Application factory for NetIntel NOC Network Traffic Analysis Platform."""
     app = Flask(__name__)
 
     # Load configuration
@@ -17,12 +20,11 @@ def create_app(config_name='default'):
 
     # Ensure required directories exist
     os.makedirs(app.config['UPLOAD_FOLDER'], exist_ok=True)
-    os.makedirs(app.config['DATA_DIR'], exist_ok=True)
     os.makedirs(app.config['LOG_DIR'], exist_ok=True)
 
     # Configure Logging
     configure_logging(app)
-    app.logger.info("Starting NIDS Application...")
+    app.logger.info("Starting NetIntel NOC Network Traffic Analysis Platform...")
 
     # Register Blueprints
     register_blueprints(app)
@@ -30,47 +32,32 @@ def create_app(config_name='default'):
     # Register Error Handlers
     register_error_handlers(app)
 
-    # Initialize Database
-    with app.app_context():
-        init_db(app)
-
     return app
 
 
 def configure_logging(app):
     """Sets up application logging."""
+    log_file = os.path.join(app.config['LOG_DIR'], 'netintel_noc.log')
 
-    if not app.debug:
-        log_file = os.path.join(app.config['LOG_DIR'], 'nids_app.log')
-        file_handler = RotatingFileHandler(
-            log_file,
-            maxBytes=10240,
-            backupCount=10
-        )
+    file_handler = RotatingFileHandler(
+        log_file,
+        maxBytes=10 * 1024 * 1024,
+        backupCount=5
+    )
 
-        file_handler.setFormatter(logging.Formatter(
-            '%(asctime)s %(levelname)s: %(message)s [in %(pathname)s:%(lineno)d]'
-        ))
+    file_handler.setFormatter(logging.Formatter(
+        '%(asctime)s %(levelname)s: %(message)s '
+        '[in %(pathname)s:%(lineno)d]'
+    ))
 
-        file_handler.setLevel(logging.INFO)
-        app.logger.addHandler(file_handler)
-        app.logger.setLevel(logging.INFO)
+    file_handler.setLevel(
+        logging.INFO if not app.debug else logging.DEBUG
+    )
 
-    else:
-        log_file = os.path.join(app.config['LOG_DIR'], 'nids_debug.log')
-        file_handler = RotatingFileHandler(
-            log_file,
-            maxBytes=10240,
-            backupCount=5
-        )
-
-        file_handler.setFormatter(logging.Formatter(
-            '%(asctime)s %(levelname)s: %(message)s [in %(pathname)s:%(lineno)d]'
-        ))
-
-        file_handler.setLevel(logging.DEBUG)
-        app.logger.addHandler(file_handler)
-        app.logger.setLevel(logging.DEBUG)
+    app.logger.addHandler(file_handler)
+    app.logger.setLevel(
+        logging.INFO if not app.debug else logging.DEBUG
+    )
 
 
 def register_error_handlers(app):
@@ -96,21 +83,19 @@ def register_error_handlers(app):
     def request_entity_too_large(error):
         app.logger.warning("413 Error: File upload exceeded MAX_CONTENT_LENGTH.")
         return jsonify({
-            "error": "File too large",
+            "error": "File too large (exceeds 32MB limit)",
             "status_code": 413
         }), 413
 
 
-# Create app for Gunicorn
+# Create app instance for WSGI
 app = create_app(os.environ.get("FLASK_ENV", "development"))
 
 
 if __name__ == "__main__":
     port = int(os.environ.get("PORT", 5000))
-
     app.run(
         host="0.0.0.0",
         port=port,
-        debug=app.config["DEBUG"],
-        use_reloader=False
+        debug=app.config["DEBUG"]
     )

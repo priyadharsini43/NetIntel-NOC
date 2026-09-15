@@ -17,7 +17,6 @@ data/*.pcapng
 data/*.cap
 
 # Generated ML artifacts
-models/*.joblib
 models/*.pkl
 
 # Frontend dependencies / build
